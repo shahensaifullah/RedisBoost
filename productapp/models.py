@@ -3,6 +3,7 @@ from django.db import models
 
 class Product(models.Model):
     product_id = models.CharField(max_length=50, unique=True, db_index=True)
+    name = models.CharField(max_length=255)
 
     def __str__(self) -> str:
         return self.product_id
@@ -48,4 +49,4 @@ class Review(models.Model):
         ordering = ["-review_time"]
 
     def __str__(self) -> str:
-        return f"Review {self.external_id} | {self.product_id}"
+        return f"Review {self.external_id} | {self.product.product_id}"

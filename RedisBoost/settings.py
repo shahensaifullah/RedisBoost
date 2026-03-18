@@ -75,9 +75,13 @@ WSGI_APPLICATION = 'RedisBoost.wsgi.application'
 # https://docs.djangoproject.com/en/6.0/ref/settings/#databases
 
 DATABASES = {
-    'default': {
-        'ENGINE': 'django.db.backends.sqlite3',
-        'NAME': BASE_DIR / 'db.sqlite3',
+    "default": {
+        "ENGINE": "django.db.backends.postgresql_psycopg2",
+        "NAME": "redisboost",
+        "USER": "postgres",
+        "PASSWORD": "saif",
+        "HOST": "localhost",
+        "PORT": "5432",
     }
 }
 
