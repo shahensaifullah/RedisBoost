@@ -15,7 +15,7 @@ local_settings.py
 db.sqlite3
 db.sqlite3-journal
 media/
-
+identifier.sqlite
 # Django migrations (optional for libraries, usually keep for apps)
 # */migrations/*
 # !*/migrations/__init__.py
@@ -79,3 +79,5 @@ celerybeat-schedule
 # Docker
 *.pid
 *.sock
+public/*
+!public/.gitkeep
