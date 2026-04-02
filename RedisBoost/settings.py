@@ -76,11 +76,11 @@ WSGI_APPLICATION = 'RedisBoost.wsgi.application'
 
 DATABASES = {
     "default": {
-        "ENGINE": "django.db.backends.postgresql_psycopg2",
+        "ENGINE": "django.db.backends.postgresql",
         "NAME": "redisboost",
         "USER": "postgres",
-        "PASSWORD": "saif",
-        "HOST": "localhost",
+        "PASSWORD": "postgres",
+        "HOST": "127.0.0.1",
         "PORT": "5432",
     }
 }

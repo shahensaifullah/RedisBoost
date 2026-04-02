@@ -13,6 +13,12 @@ from django.db import transaction
 from faker import Faker
 
 from productapp.models import Product, Customer, Review
+from productapp.redi_models import (
+    ProductCache,
+    CustomerCache,
+    ReviewCache,
+    run_redis_migrations,
+)
 
 fake = Faker()
 
@@ -97,6 +103,9 @@ class Command(BaseCommand):
 
         self.stdout.write(self.style.WARNING("Starting CSV import..."))
         self.import_reviews(destination, batch_size=batch_size, limit=limit)
+
+        self.stdout.write(self.style.WARNING("Running Redis OM migrations..."))
+        run_redis_migrations()
 
 
 
@@ -214,6 +223,26 @@ class Command(BaseCommand):
             )
         )
 
+    def save_to_redis(self, products, customers, reviews):
+        for item in products:
+            try:
+                item.save()
+            except Exception as e:
+                self.stderr.write(f"Redis product save failed: {e}")
+
+        for item in customers:
+            try:
+                item.save()
+            except Exception as e:
+                self.stderr.write(f"Redis customer save failed: {e}")
+
+        for item in reviews:
+            try:
+                item.save()
+            except Exception as e:
+                self.stderr.write(f"Redis review save failed: {e}")
+                
+
     @transaction.atomic
     def flush_batch(self, product_buffer, customer_buffer, review_buffer, batch_size):
         product_ids = list(product_buffer.keys())
@@ -265,6 +294,26 @@ class Command(BaseCommand):
         }
 
         new_reviews = []
+        redis_products_to_save = []
+        redis_customers_to_save = []
+        redis_reviews_to_save = []
+
+        for product in new_products:
+            redis_products_to_save.append(
+                ProductCache(
+                    product_id=product.product_id,
+                    name=product.name,
+                )
+            )
+
+        for customer in new_customers:
+            redis_customers_to_save.append(
+                CustomerCache(
+                    user_id=customer.user_id,
+                    profile_name=customer.profile_name,
+                )
+            )
+
         for item in review_buffer:
             if item["external_id"] in existing_review_ids:
                 continue
@@ -275,17 +324,32 @@ class Command(BaseCommand):
             if not product or not customer:
                 continue
 
-            new_reviews.append(
-                Review(
+            review = Review(
+                external_id=item["external_id"],
+                help_numerator=item["help_numerator"],
+                help_denominator=item["help_denominator"],
+                score=item["score"],
+                review_time=item["review_time"],
+                summary=item["summary"],
+                text=item["text"],
+                product=product,
+                customer=customer,
+            )
+            new_reviews.append(review)
+
+            redis_reviews_to_save.append(
+                ReviewCache(
                     external_id=item["external_id"],
                     help_numerator=item["help_numerator"],
                     help_denominator=item["help_denominator"],
-                    score=item["score"],
+                    score=float(item["score"]),
                     review_time=item["review_time"],
                     summary=item["summary"],
                     text=item["text"],
-                    product=product,
-                    customer=customer,
+                    product_id=product.product_id,
+                    product_name=product.name,
+                    user_id=customer.user_id,
+                    profile_name=customer.profile_name,
                 )
             )
 
@@ -293,6 +357,12 @@ class Command(BaseCommand):
             new_reviews,
             batch_size=batch_size,
             ignore_conflicts=True,
+        )
+
+        self.save_to_redis(
+            products=redis_products_to_save,
+            customers=redis_customers_to_save,
+            reviews=redis_reviews_to_save,
         )
 
         return len(new_products), len(new_customers), len(new_reviews)
