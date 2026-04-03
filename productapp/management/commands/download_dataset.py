@@ -13,7 +13,7 @@ from django.db import transaction
 from faker import Faker
 
 from productapp.models import Product, Customer, Review
-from productapp.redi_models import (
+from productapp.redis_models import (
     ProductCache,
     CustomerCache,
     ReviewCache,
