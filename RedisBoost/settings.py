@@ -121,3 +121,4 @@ USE_TZ = True
 # https://docs.djangoproject.com/en/6.0/howto/static-files/
 
 STATIC_URL = 'static/'
+REDIS_OM_URL = "redis://localhost:6379/0"
