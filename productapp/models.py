@@ -18,7 +18,6 @@ class Brand(models.Model):
 
 class Product(models.Model):
     pid = models.CharField(max_length=50, unique=True, db_index=True)
-    uniq_id = models.CharField(max_length=64, unique=True, db_index=True)
     crawl_timestamp = models.DateTimeField(null=True, blank=True)
     product_url = models.URLField(blank=True)
     name = models.CharField(max_length=255, db_index=True)
