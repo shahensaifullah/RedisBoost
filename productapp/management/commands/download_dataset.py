@@ -1,368 +1,414 @@
+import ast
 import csv
-import hashlib
 import os
+import random
+import secrets
 import shutil
-from datetime import datetime, timezone
-from decimal import Decimal
+import string
+import uuid
+from datetime import timedelta
+from decimal import Decimal, InvalidOperation
 
 import kagglehub
 from django.conf import settings
-from django.core.management import call_command
-from django.core.management.base import BaseCommand
+from django.core.management import BaseCommand, call_command
 from django.db import transaction
+from django.utils import timezone
+from django.utils.dateparse import parse_datetime
 from faker import Faker
+from tqdm import tqdm
 
-from productapp.models import Product, Customer, Review
-from productapp.redis_models import (
-    ProductCache,
-    CustomerCache,
-    ReviewCache,
-    run_redis_migrations,
+from productapp.models import (
+    Brand,
+    Category,
+    Customer,
+    Order,
+    OrderItem,
+    Product,
+    ProductImage,
 )
 
-fake = Faker()
-
-
-ADJECTIVES = [
-        "Organic", "Premium", "Classic", "Natural", "Fresh", "Deluxe", "Healthy", "Golden",
-        "Signature", "Pure", "Savory", "Rich", "Authentic", "Traditional", "Crafted",
-        "Farmhouse", "Artisan", "Select", "Superior", "Wholesome"
-    ]
-
-FLAVORS = [
-        "Vanilla", "Chocolate", "Honey", "Roasted", "Salted", "Sweet", "Berry", "Lemon",
-        "Herbal", "Caramel", "Coconut", "Almond", "Hazelnut", "Strawberry", "Apple",
-        "Cinnamon", "Peppermint", "Maple", "Mocha", "Banana"
-    ]
-
-PRODUCT_TYPES = [
-        "Tea", "Coffee", "Snack Bar", "Protein Bar", "Cookies", "Biscuits",
-        "Chocolate", "Granola", "Cereal", "Energy Bites", "Protein Mix",
-        "Honey Spread", "Nut Mix", "Trail Mix", "Spice Blend", "Green Tea",
-        "Black Tea", "Herbal Tea", "Instant Coffee", "Ground Coffee",
-        "Energy Drink", "Fruit Juice", "Smoothie Mix", "Oatmeal", "Pancake Mix",
-        "Peanut Butter", "Almond Butter", "Protein Shake", "Vitamin Gummies"
-    ]
-
-
-def generate_product_name(product_id):
-    digest = hashlib.md5(product_id.encode()).hexdigest()
-
-    adj = ADJECTIVES[int(digest[0:2], 16) % len(ADJECTIVES)]
-    flavor = FLAVORS[int(digest[2:4], 16) % len(FLAVORS)]
-    ptype = PRODUCT_TYPES[int(digest[4:6], 16) % len(PRODUCT_TYPES)]
-
-    return f"{adj} {flavor} {ptype}"
 
 class Command(BaseCommand):
-    help = "Download Reviews.csv from Kaggle Hub, migrate, and import into database"
+    help = "Download Flipkart CSV, import products, create fake customers/orders, and sync data to Redis OM."
 
     def add_arguments(self, parser):
-        parser.add_argument(
-            "--batch-size",
-            type=int,
-            default=5000,
-            help="Batch size for bulk insert",
-        )
-        parser.add_argument(
-            "--limit",
-            type=int,
-            default=None,
-            help="Optional limit for testing import",
-        )
+        parser.add_argument("--customers", type=int, default=5000)
+        parser.add_argument("--orders", type=int, default=20000)
+        parser.add_argument("--clear", action="store_true")
 
     def handle(self, *args, **options):
-        batch_size = options["batch_size"]
-        limit = options["limit"]
+        customer_count = options["customers"]
+        order_count = options["orders"]
+        should_clear = options["clear"]
 
-        self.stdout.write("Downloading dataset from Kaggle...")
+        if should_clear:
+            self.clear_existing_data()
 
-        dataset_path = kagglehub.dataset_download("snap/amazon-fine-food-reviews")
-        self.stdout.write(f"Dataset downloaded at: {dataset_path}")
+        csv_path = self.download_csv()
 
-        source_file = os.path.join(dataset_path, "Reviews.csv")
+        self.import_products(csv_path)
+        self.create_fake_customers(customer_count)
+        self.create_fake_orders(order_count)
+
+        self.stdout.write(self.style.SUCCESS("Demo data load completed successfully."))
+
+    # ---------------------------------------------------
+    # STEP 1: DOWNLOAD CSV
+    # ---------------------------------------------------
+    def download_csv(self):
+        tqdm.write("Downloading dataset from Kaggle...")
+        path = kagglehub.dataset_download("atharvjairath/flipkart-ecommerce-dataset")
+        tqdm.write(f"Dataset downloaded at: {path}")
+
+        source_file = os.path.join(path, "flipkart_com-ecommerce_sample.csv")
+        tqdm.write(f"Source file: {source_file}")
+
         if not os.path.exists(source_file):
-            self.stderr.write("Reviews.csv not found!")
-            return
+            raise FileNotFoundError("flipkart_com-ecommerce_sample.csv not found!")
 
         public_dir = os.path.join(settings.BASE_DIR, "public")
         os.makedirs(public_dir, exist_ok=True)
 
-        destination = os.path.join(public_dir, "Reviews.csv")
+        destination = os.path.join(public_dir, "flipkart_com-ecommerce_sample.csv")
         shutil.copy(source_file, destination)
 
-        self.stdout.write(
-            self.style.SUCCESS(f"Reviews.csv saved to {destination}")
-        )
+        tqdm.write(f"CSV copied to: {destination}")
+        return destination
 
-        self.stdout.write(self.style.WARNING("Running makemigrations..."))
-        call_command("makemigrations")
+    # ---------------------------------------------------
+    # OPTIONAL: CLEAR OLD DATA
+    # ---------------------------------------------------
+    def clear_existing_data(self):
+        tqdm.write("Clearing existing database data...")
 
-        self.stdout.write(self.style.WARNING("Running migrate..."))
-        call_command("migrate")
+        OrderItem.objects.all().delete()
+        Order.objects.all().delete()
+        Customer.objects.all().delete()
+        ProductImage.objects.all().delete()
+        Product.objects.all().delete()
+        Brand.objects.all().delete()
+        Category.objects.all().delete()
 
-        self.stdout.write(self.style.WARNING("Starting CSV import..."))
-        self.import_reviews(destination, batch_size=batch_size, limit=limit)
+        tqdm.write("Existing data cleared.")
 
-        self.stdout.write(self.style.WARNING("Running Redis OM migrations..."))
-        run_redis_migrations()
+    def clear_redis_model(self, model_cls):
+        try:
+            pks = list(model_cls.all_pks())
+            for pk in tqdm(pks, desc=f"Clearing {model_cls.__name__}", unit="records"):
+                model_cls.delete(pk)
+        except Exception as exc:
+            self.stderr.write(f"Could not clear Redis model {model_cls.__name__}: {exc}")
 
+    # ---------------------------------------------------
+    # STEP 2: IMPORT PRODUCTS
+    # ---------------------------------------------------
+    def import_products(self, csv_path):
+        tqdm.write("Importing products into database..." + str(csv_path))
 
+        created_count = 0
+        updated_count = 0
+        skipped_count = 0
 
-
-
-
-    def import_reviews(self, file_path, batch_size=5000, limit=None):
-        rows_processed = 0
-        total_products_created = 0
-        total_customers_created = 0
-        total_reviews_created = 0
-
-        with open(file_path, "r", encoding="utf-8", newline="") as csvfile:
-            reader = csv.DictReader(csvfile)
-
-            product_buffer = {}
-            customer_buffer = {}
-            review_buffer = []
-
-            for row in reader:
-                if limit and rows_processed >= limit:
-                    break
-
-                try:
-                    external_id = int(row["Id"])
-                    product_id = (row["ProductId"] or "").strip()
-                    user_id = (row["UserId"] or "").strip()
-                    profile_name = (row.get("ProfileName") or "").strip() or None
-                    help_numerator = int(row.get("HelpfulnessNumerator") or 0)
-                    help_denominator = int(row.get("HelpfulnessDenominator") or 0)
-                    score = Decimal(str(row["Score"]))
-                    review_time = datetime.fromtimestamp(
-                        int(row["Time"]),
-                        tz=timezone.utc,
-                    )
-                    summary = (row.get("Summary") or "").strip() or None
-                    text = (row.get("Text") or "").strip()
-
-                    if not product_id or not user_id or not text:
-                        continue
-
-                    if product_id not in product_buffer:
-                        product_buffer[product_id] = Product(
-                            product_id=product_id,
-                            name=generate_product_name(product_id)
-                        )
-
-                    if user_id not in customer_buffer:
-                        customer_buffer[user_id] = Customer(
-                            user_id=user_id,
-                            profile_name=profile_name,
-                        )
-
-                    review_buffer.append(
-                        {
-                            "external_id": external_id,
-                            "product_id": product_id,
-                            "user_id": user_id,
-                            "help_numerator": help_numerator,
-                            "help_denominator": help_denominator,
-                            "score": score,
-                            "review_time": review_time,
-                            "summary": summary,
-                            "text": text,
-                        }
-                    )
-
-                    rows_processed += 1
-
-                    if len(review_buffer) >= batch_size:
-                        p, c, r = self.flush_batch(
-                            product_buffer,
-                            customer_buffer,
-                            review_buffer,
-                            batch_size,
-                        )
-                        total_products_created += p
-                        total_customers_created += c
-                        total_reviews_created += r
-
-                        self.stdout.write(
-                            f"Processed={rows_processed} | "
-                            f"Products={total_products_created} | "
-                            f"Customers={total_customers_created} | "
-                            f"Reviews={total_reviews_created}"
-                        )
-
-                        product_buffer.clear()
-                        customer_buffer.clear()
-                        review_buffer.clear()
-
-                except Exception as e:
-                    self.stderr.write(
-                        f"Skipping row around {rows_processed + 1}: {e}"
-                    )
-
-            if review_buffer:
-                p, c, r = self.flush_batch(
-                    product_buffer,
-                    customer_buffer,
-                    review_buffer,
-                    batch_size,
-                )
-                total_products_created += p
-                total_customers_created += c
-                total_reviews_created += r
+        with open(csv_path, newline="", encoding="utf-8") as csvfile:
+            reader = list(csv.DictReader(csvfile))
+            for row in tqdm(reader, desc="Importing products into database", unit="records"):
+                with transaction.atomic():
+                    product, created = self.create_or_update_product(row)
+                    if created:
+                        self.attach_categories(product, row.get("product_category_tree"))
+                        self.attach_images(product, row.get("image"))
 
         self.stdout.write(
             self.style.SUCCESS(
-                f"Import finished. "
-                f"Rows processed={rows_processed}, "
-                f"Products created={total_products_created}, "
-                f"Customers created={total_customers_created}, "
-                f"Reviews created={total_reviews_created}"
+                f"Products imported. Created={created_count}, Updated={updated_count}, Skipped={skipped_count}"
             )
         )
 
-    def save_to_redis(self, products, customers, reviews):
-        for item in products:
-            try:
-                item.save()
-            except Exception as e:
-                self.stderr.write(f"Redis product save failed: {e}")
+    def generate_pid(self, length=16):
+        chars = string.ascii_uppercase + string.digits
+        return ''.join(secrets.choice(chars) for _ in range(length))
 
-        for item in customers:
-            try:
-                item.save()
-            except Exception as e:
-                self.stderr.write(f"Redis customer save failed: {e}")
+    def generate_unique_pid(self, length=16):
+        pid = self.generate_pid(length)
 
-        for item in reviews:
-            try:
-                item.save()
-            except Exception as e:
-                self.stderr.write(f"Redis review save failed: {e}")
-                
+        if Product.objects.filter(pid=pid).exists():
+            return self.generate_unique_pid()  # recursion if duplicate
 
-    @transaction.atomic
-    def flush_batch(self, product_buffer, customer_buffer, review_buffer, batch_size):
-        product_ids = list(product_buffer.keys())
-        user_ids = list(customer_buffer.keys())
-        external_ids = [item["external_id"] for item in review_buffer]
+        return pid
 
-        existing_product_ids = set(
-            Product.objects.filter(product_id__in=product_ids)
-            .values_list("product_id", flat=True)
-        )
-        existing_user_ids = set(
-            Customer.objects.filter(user_id__in=user_ids)
-            .values_list("user_id", flat=True)
-        )
-        existing_review_ids = set(
-            Review.objects.filter(external_id__in=external_ids)
-            .values_list("external_id", flat=True)
-        )
+    def create_or_update_product(self, row):
+        pid = (row.get("pid") or "").strip()
 
-        new_products = [
-            product_buffer[pid]
-            for pid in product_ids
-            if pid not in existing_product_ids
-        ]
-        new_customers = [
-            customer_buffer[uid]
-            for uid in user_ids
-            if uid not in existing_user_ids
-        ]
+        if not pid:
+            pid = self.generate_unique_pid()
 
-        Product.objects.bulk_create(
-            new_products,
-            batch_size=batch_size,
-            ignore_conflicts=True,
-        )
-        Customer.objects.bulk_create(
-            new_customers,
-            batch_size=batch_size,
-            ignore_conflicts=True,
-        )
+        brand_name = (row.get("brand") or "").strip() or "Unknown"
+        brand, _ = Brand.objects.get_or_create(name=brand_name[:100])
 
-        product_map = {
-            obj.product_id: obj
-            for obj in Product.objects.filter(product_id__in=product_ids)
-        }
-        customer_map = {
-            obj.user_id: obj
-            for obj in Customer.objects.filter(user_id__in=user_ids)
+        defaults = {
+            "pid": pid,
+            "crawl_timestamp": self.parse_timestamp(row.get("crawl_timestamp")),
+            "name": (row.get("product_name") or "").strip()[:255],
+            "description": (row.get("description") or "").strip(),
+            "brand": brand,
+            "retail_price": self.to_decimal(row.get("retail_price")),
+            "discounted_price": self.to_decimal(row.get("discounted_price")),
+            "product_rating": (row.get("product_rating") or "").strip()[:50],
+            "overall_rating": (row.get("overall_rating") or "").strip()[:50],
+            "is_fk_advantage_product": self.to_bool(row.get("is_FK_Advantage_product")),
         }
 
-        new_reviews = []
-        redis_products_to_save = []
-        redis_customers_to_save = []
-        redis_reviews_to_save = []
-
-        for product in new_products:
-            redis_products_to_save.append(
-                ProductCache(
-                    product_id=product.product_id,
-                    name=product.name,
-                )
-            )
-
-        for customer in new_customers:
-            redis_customers_to_save.append(
-                CustomerCache(
-                    user_id=customer.user_id,
-                    profile_name=customer.profile_name,
-                )
-            )
-
-        for item in review_buffer:
-            if item["external_id"] in existing_review_ids:
-                continue
-
-            product = product_map.get(item["product_id"])
-            customer = customer_map.get(item["user_id"])
-
-            if not product or not customer:
-                continue
-
-            review = Review(
-                external_id=item["external_id"],
-                help_numerator=item["help_numerator"],
-                help_denominator=item["help_denominator"],
-                score=item["score"],
-                review_time=item["review_time"],
-                summary=item["summary"],
-                text=item["text"],
-                product=product,
-                customer=customer,
-            )
-            new_reviews.append(review)
-
-            redis_reviews_to_save.append(
-                ReviewCache(
-                    external_id=item["external_id"],
-                    help_numerator=item["help_numerator"],
-                    help_denominator=item["help_denominator"],
-                    score=float(item["score"]),
-                    review_time=item["review_time"],
-                    summary=item["summary"],
-                    text=item["text"],
-                    product_id=product.product_id,
-                    product_name=product.name,
-                    user_id=customer.user_id,
-                    profile_name=customer.profile_name,
-                )
-            )
-
-        Review.objects.bulk_create(
-            new_reviews,
-            batch_size=batch_size,
-            ignore_conflicts=True,
+        product, created = Product.objects.get_or_create(
+            pid=pid,
+            defaults=defaults,
         )
+        return product, created
 
-        self.save_to_redis(
-            products=redis_products_to_save,
-            customers=redis_customers_to_save,
-            reviews=redis_reviews_to_save,
-        )
+    def attach_categories(self, product, raw_tree):
+        category_names = self.parse_category_tree(raw_tree)
+        if not category_names:
+            return
 
-        return len(new_products), len(new_customers), len(new_reviews)
+        categories = []
+        for category_name in category_names:
+            category, _ = Category.objects.get_or_create(name=category_name[:150])
+            categories.append(category)
+
+        product.categories.set(categories)
+
+    def attach_images(self, product, raw_images):
+        image_urls = self.parse_image_list(raw_images)
+        if not image_urls:
+            return
+
+        existing_urls = set(product.images.values_list("image", flat=True))
+        new_images = []
+
+        for image_url in image_urls:
+            if image_url and image_url not in existing_urls:
+                new_images.append(ProductImage(product=product, image=image_url))
+
+        if new_images:
+            ProductImage.objects.bulk_create(new_images, batch_size=500)
+
+    # ---------------------------------------------------
+    # STEP 3: CREATE FAKE CUSTOMERS
+    # ---------------------------------------------------
+    def create_fake_customers(self, count):
+        tqdm.write(f"Creating {count} fake customers...")
+
+        if Customer.objects.exists():
+            tqdm.write("Customers already exist. Skipping customer creation.")
+            return
+
+        fake = Faker()
+        customers = []
+
+        for _ in tqdm(range(count), desc="Preparing Customers", unit="customers"):
+            customers.append(
+                Customer(
+                    full_name=fake.name(),
+                    email=fake.unique.email(),
+                    city=fake.city(),
+                    country=fake.country(),
+                )
+            )
+
+        Customer.objects.bulk_create(customers, batch_size=1000)
+        self.stdout.write(self.style.SUCCESS(f"{count} customers created."))
+
+    # ---------------------------------------------------
+    # STEP 4: CREATE FAKE ORDERS
+    # ---------------------------------------------------
+    def create_fake_orders(self, count):
+        tqdm.write(f"Creating {count} fake orders...")
+
+        if Order.objects.exists():
+            tqdm.write("Orders already exist. Skipping order creation.")
+            return
+
+        customers = list(Customer.objects.all().iterator(chunk_size=1000))
+        products = list(Product.objects.all().iterator(chunk_size=1000))
+
+        if not customers:
+            raise ValueError("No customers found.")
+        if not products:
+            raise ValueError("No products found.")
+
+        statuses = [
+            Order.Status.PENDING,
+            Order.Status.PAID,
+            Order.Status.SHIPPED,
+            Order.Status.DELIVERED,
+            Order.Status.CANCELED,
+            Order.Status.REFUNDED,
+        ]
+        status_weights = [10, 20, 15, 40, 10, 5]
+        payment_methods = ["card", "cash_on_delivery", "paypal", "bank_transfer", "upi"]
+
+        now = timezone.now()
+        orders_to_create = []
+        order_items_payload = []
+
+        for _ in tqdm(range(count), desc="Generating Orders", unit="orders"):
+            customer = random.choice(customers)
+            status = random.choices(statuses, weights=status_weights, k=1)[0]
+
+            placed_at = now - timedelta(
+                days=random.randint(0, 365),
+                hours=random.randint(0, 23),
+                minutes=random.randint(0, 59),
+            )
+
+            selected_products = random.sample(products, k=random.randint(1, 4))
+
+            subtotal = Decimal("0.00")
+            discount_amount = Decimal("0.00")
+            shipping_cost = Decimal(str(random.choice([0, 40, 60, 80, 100])))
+            item_payload = []
+
+            for product in selected_products:
+                base_price = (
+                    product.discounted_price
+                    if product.discounted_price > 0
+                    else product.retail_price
+                )
+
+                if base_price <= 0:
+                    base_price = Decimal(str(random.randint(100, 3000)))
+
+                quantity = random.randint(1, 3)
+                discount_per_unit = Decimal(
+                    str(round(random.uniform(0, float(base_price) * 0.15), 2))
+                )
+                line_total = (base_price - discount_per_unit) * quantity
+
+                if line_total < 0:
+                    line_total = Decimal("0.00")
+
+                subtotal += base_price * quantity
+                discount_amount += discount_per_unit * quantity
+
+                item_payload.append(
+                    {
+                        "product": product,
+                        "quantity": quantity,
+                        "unit_price": base_price,
+                        "discount_per_unit": discount_per_unit,
+                        "line_total": line_total.quantize(Decimal("0.01")),
+                    }
+                )
+
+            taxable_amount = subtotal - discount_amount
+            if taxable_amount < 0:
+                taxable_amount = Decimal("0.00")
+
+            tax_amount = (taxable_amount * Decimal("0.05")).quantize(Decimal("0.01"))
+            total_amount = (taxable_amount + tax_amount + shipping_cost).quantize(Decimal("0.01"))
+
+            paid_at = None
+            delivered_at = None
+
+            if status in [
+                Order.Status.PAID,
+                Order.Status.SHIPPED,
+                Order.Status.DELIVERED,
+                Order.Status.REFUNDED,
+            ]:
+                paid_at = placed_at + timedelta(hours=random.randint(1, 24))
+
+            if status == Order.Status.DELIVERED:
+                delivered_at = placed_at + timedelta(days=random.randint(2, 10))
+
+            orders_to_create.append(
+                Order(
+                    customer=customer,
+                    status=status,
+                    subtotal=subtotal.quantize(Decimal("0.01")),
+                    discount_amount=discount_amount.quantize(Decimal("0.01")),
+                    shipping_cost=shipping_cost,
+                    tax_amount=tax_amount,
+                    total_amount=total_amount,
+                    placed_at=placed_at,
+                    paid_at=paid_at,
+                    delivered_at=delivered_at,
+                    payment_method=random.choice(payment_methods),
+                    transaction_id=str(uuid.uuid4())[:20],
+                )
+            )
+            order_items_payload.append(item_payload)
+
+        tqdm.write("Saving orders to database...")
+        created_orders = Order.objects.bulk_create(orders_to_create, batch_size=1000)
+
+        tqdm.write("Preparing order items...")
+        order_items = []
+
+        for order, items in tqdm(
+                zip(created_orders, order_items_payload),
+                total=len(created_orders),
+                desc="Building OrderItems",
+                unit="orders",
+        ):
+            for item in items:
+                order_items.append(
+                    OrderItem(
+                        order=order,
+                        product=item["product"],
+                        quantity=item["quantity"],
+                        unit_price=item["unit_price"],
+                        discount_per_unit=item["discount_per_unit"],
+                        line_total=item["line_total"],
+                    )
+                )
+
+        tqdm.write("Saving order items to database...")
+        OrderItem.objects.bulk_create(order_items, batch_size=3000)
+        self.stdout.write(self.style.SUCCESS(f"{count} orders created."))
+
+    # ---------------------------------------------------
+    # HELPERS
+    # ---------------------------------------------------
+    def parse_category_tree(self, raw_value):
+        if not raw_value:
+            return []
+
+        try:
+            parsed = ast.literal_eval(raw_value)
+            if not parsed:
+                return []
+
+            first_path = parsed[0]
+            return [part.strip() for part in first_path.split(">>") if part.strip()]
+        except Exception:
+            return []
+
+    def parse_image_list(self, raw_value):
+        if not raw_value:
+            return []
+
+        try:
+            parsed = ast.literal_eval(raw_value)
+            if isinstance(parsed, list):
+                return [str(item).strip() for item in parsed if str(item).strip()]
+        except Exception:
+            pass
+        return []
+
+    def parse_timestamp(self, value):
+        if not value:
+            return None
+        return parse_datetime(value)
+
+    def to_decimal(self, value):
+        if value in [None, "", "null"]:
+            return Decimal("0.00")
+
+        try:
+            return Decimal(str(value).replace(",", "").strip())
+        except (InvalidOperation, ValueError):
+            return Decimal("0.00")
+
+    def to_bool(self, value):
+        return str(value).strip().lower() == "true"

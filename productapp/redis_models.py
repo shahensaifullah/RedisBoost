@@ -20,36 +20,49 @@ class RedisBaseModel(JsonModel):
         database = redis_db
         global_key_prefix = "demo_shop"
 
+from decimal import Decimal
+from typing import Optional, List, Dict, Any
+from datetime import datetime
 
-class ProductCache(RedisBaseModel, index=True):
-    django_id: int = Field(index=True, sortable=True)
-    pid: str = Field(index=True, default="")
-    name: str = Field(full_text_search=True, sortable=True, default="")
-    description: str = Field(full_text_search=True, default="")
-    brand_name: str = Field(index=True, default="")
-    primary_category: str = Field(index=True, default="")
-    categories_text: str = Field(full_text_search=True, default="")
-
-    retail_price: float = Field(sortable=True, default=0)
-    discounted_price: float = Field(sortable=True, default=0)
-
-    product_rating: str = Field(index=True, default="")
-    overall_rating: str = Field(index=True, default="")
-    is_fk_advantage_product: bool = Field(index=True, default=False)
-
-    image_count: int = Field(sortable=True, default=0)
-    created_at: datetime | None = Field(sortable=True, default=None)
-    crawl_timestamp: datetime | None = Field(sortable=True, default=None)
-
-    category_names: list[str] = Field(default_factory=list)
-    image_urls: list[str] = Field(default_factory=list)
-    specifications: dict = Field(default_factory=dict)
-    product_url: str = Field(default="")
-
-    class Meta(RedisBaseModel.Meta):
-        model_key_prefix = "product"
+from pydantic import ConfigDict
+from redis_om import JsonModel, EmbeddedJsonModel, Field
 
 
+class BrandData(EmbeddedJsonModel):
+    id: int = Field(index=True)
+    name: str = Field(index=True, full_text_search=True)
+
+
+
+class CategoryData(EmbeddedJsonModel):
+    id: int = Field(default=None, index=True)
+    name: str = Field(index=True, full_text_search=True)
+
+
+
+class ProductCache(JsonModel, index=True):
+    django_id: int = Field(index=True)
+    pid: str = Field(index=True)
+    crawl_timestamp: Optional[datetime] = Field(default=None, index=True)
+
+    name: str = Field(index=True, full_text_search=True)
+    description: Optional[str] = Field(default="")
+
+    brand: BrandData
+    categories: List[dict]
+
+    retail_price: Decimal = Field(default=Decimal("0.00"), index=True)
+    discounted_price: Decimal = Field(default=Decimal("0.00"), index=True)
+
+    product_rating: Optional[str] = Field(default="", index=True)
+    overall_rating: Optional[str] = Field(default="", index=True)
+
+    is_fk_advantage_product: bool = Field(default=False, index=True)
+    images: Optional[List[str]] = None
+
+    created_at: Optional[datetime] = Field(default=None, index=True)
+
+#
 class CustomerCache(RedisBaseModel, index=True):
     django_id: int = Field(index=True, sortable=True)
     email: str = Field(index=True, default="")
@@ -70,8 +83,8 @@ class CustomerCache(RedisBaseModel, index=True):
 
     class Meta(RedisBaseModel.Meta):
         model_key_prefix = "customer"
-
-
+#
+#
 class OrderCache(RedisBaseModel, index=True):
     django_id: int = Field(index=True, sortable=True)
     customer_id: int = Field(index=True, sortable=True)
