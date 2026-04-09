@@ -19,7 +19,6 @@ class Brand(models.Model):
 class Product(models.Model):
     pid = models.CharField(max_length=50, unique=True, db_index=True)
     crawl_timestamp = models.DateTimeField(null=True, blank=True)
-    product_url = models.URLField(blank=True)
     name = models.CharField(max_length=255, db_index=True)
     description = models.TextField(blank=True)
 
@@ -38,8 +37,6 @@ class Product(models.Model):
     overall_rating = models.CharField(max_length=50, blank=True)
 
     is_fk_advantage_product = models.BooleanField(default=False)
-
-    product_specifications = models.JSONField(default=dict, blank=True)
 
     categories = models.ManyToManyField(Category, related_name="products", blank=True)
 

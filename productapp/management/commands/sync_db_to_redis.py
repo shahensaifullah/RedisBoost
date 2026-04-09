@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from decimal import Decimal, InvalidOperation
 
 from django.core.management.base import BaseCommand
@@ -7,10 +8,10 @@ from django.db.models import Count, Max, Q, Sum
 
 from productapp.models import Customer, Order, Product
 from productapp.redis_models import (
-    CustomerCache,
-    OrderCache,
+    # CustomerCache,
+    # OrderCache,
     ProductCache,
-    run_redis_migrations,
+    run_redis_migrations, CustomerCache, OrderCache,
 )
 
 
@@ -61,15 +62,15 @@ class Command(BaseCommand):
         if flush:
             self.stdout.write(self.style.WARNING("Flushing Redis documents..."))
             self._delete_all(ProductCache)
-            self._delete_all(CustomerCache)
-            self._delete_all(OrderCache)
+            # self._delete_all(CustomerCache)
+            # self._delete_all(OrderCache)
 
-        if not customers_only and not orders_only:
-            self.sync_products()
+        # if not customers_only and not orders_only:
+        #     self.sync_products()
 
-        if not products_only and not orders_only:
-            self.sync_customers()
-
+        # if not products_only and not orders_only:
+        #     self.sync_customers()
+        #
         if not products_only and not customers_only:
             self.sync_orders()
 
@@ -110,8 +111,6 @@ class Command(BaseCommand):
             pid = product.pid
             name = product.name
             description = product.description
-            brand_name = product.brand.name
-            product_url = product.product_url
 
             category_names = unique_keep_order(
                 list(product.categories.values_list("name", flat=True))
@@ -119,44 +118,40 @@ class Command(BaseCommand):
             if not category_names:
                 category_names = ["Uncategorized"]
 
-            image_urls = unique_keep_order(
-                list(product.images.values_list("image", flat=True))
-            )
-            # find_product = ProductCache.find(ProductCache.django_id == product.id)
-            # if find_product.count() > 0:
-            #     find_product.delete()
+            image_urls = product.images.values_list("image", flat=True)
+            try:
+                ProductCache(
+                    django_id=product.id,
+                    pid=pid,
+                    crawl_timestamp=product.crawl_timestamp,
+                    name=name,
+                    description=description,
+                    brand={
+                        "id": product.brand.id,
+                        "name": product.brand.name,
+                    },
+                    # categories = []
+                    categories=[{"id": data.id, "name": data.name} for data in product.categories.all()],
+                    retail_price=to_float(product.retail_price),
+                    discounted_price=to_float(product.discounted_price),
+                    product_rating=clean_str(product.product_rating, default="0"),
+                    overall_rating=clean_str(product.overall_rating, default="0"),
+                    is_fk_advantage_product=bool(product.is_fk_advantage_product),
+                    created_at=product.created_at,
+                    images=image_urls,
 
-            ProductCache(
-                django_id=product.id,
-                pid=pid,
-                name=name,
-                description=description,
-                brand_name=brand_name,
-                primary_category=category_names[0],
-                categories_text=" ".join(category_names),
-                retail_price=to_float(product.retail_price),
-                discounted_price=to_float(product.discounted_price),
-                product_rating=clean_str(product.product_rating, default="0"),
-                overall_rating=clean_str(product.overall_rating, default="0"),
-                is_fk_advantage_product=bool(product.is_fk_advantage_product),
-                image_count=len(image_urls),
-                created_at=product.created_at,
-                crawl_timestamp=product.crawl_timestamp,
-                category_names=category_names,
-                image_urls=image_urls,
-                specifications=product.product_specifications or {},
-                product_url=product_url,
-            ).save()
+                ).save()
 
-            created_count += 1
+                created_count += 1
 
-            # except Exception as exc:
-            #     skipped_count += 1
-            #     self.stdout.write(
-            #         self.style.WARNING(
-            #             f"Skipping product id={product.id} because error: {exc}"
-            #         )
-            #     )
+
+            except Exception as exc:
+                skipped_count += 1
+                self.stdout.write(
+                    self.style.WARNING(
+                        f"Skipping product id={product.id} because error: {exc}"
+                    )
+                )
 
         self.stdout.write(
             self.style.SUCCESS(
