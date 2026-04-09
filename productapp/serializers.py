@@ -1,35 +1,30 @@
 from rest_framework import serializers
 
-from .models import Product
 
+class BrandSerializer(serializers.Serializer):
+    id = serializers.IntegerField()
+    name = serializers.CharField()
 
-class ProductSerializer(serializers.ModelSerializer):
-    brand_name = serializers.CharField(source="brand.name", read_only=True)
-    category_names = serializers.SerializerMethodField()
-    image_urls = serializers.SerializerMethodField()
+class CategorySerializer(serializers.Serializer):
+    id = serializers.IntegerField()
+    name = serializers.CharField()
 
-    class Meta:
-        model = Product
-        fields = [
-            "id",
-            "pid",
-            "name",
-            "description",
-            "brand_name",
-            "retail_price",
-            "discounted_price",
-            "product_rating",
-            "overall_rating",
-            "is_fk_advantage_product",
-            "category_names",
-            "image_urls",
-            "product_url",
-            "crawl_timestamp",
-            "created_at",
-        ]
+class ProductSerializer(serializers.Serializer):
+    id = serializers.IntegerField()
+    pid = serializers.CharField()
+    crawl_timestamp = serializers.DateTimeField(allow_null=True)
+    name = serializers.CharField()
+    description = serializers.CharField()
+    brand = BrandSerializer()
+    categories = CategorySerializer(many=True)
+    retail_price = serializers.FloatField()
+    discounted_price = serializers.FloatField()
+    product_rating = serializers.CharField()
+    overall_rating = serializers.CharField()
+    is_fk_advantage_product = serializers.BooleanField()
+    images = serializers.SerializerMethodField()
 
-    def get_category_names(self, obj):
-        return list(obj.categories.values_list("name", flat=True))
+    created_at = serializers.DateTimeField(allow_null=True)
 
-    def get_image_urls(self, obj):
-        return list(obj.images.values_list("image", flat=True))
+    def get_images(self, obj):
+        return obj.images.all().values_list('image', flat=True)

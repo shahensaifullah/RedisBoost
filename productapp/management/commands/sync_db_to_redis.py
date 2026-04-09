@@ -5,6 +5,7 @@ from decimal import Decimal, InvalidOperation
 
 from django.core.management.base import BaseCommand
 from django.db.models import Count, Max, Q, Sum
+from tqdm import tqdm
 
 from productapp.models import Customer, Order, Product
 from productapp.redis_models import (
@@ -62,14 +63,14 @@ class Command(BaseCommand):
         if flush:
             self.stdout.write(self.style.WARNING("Flushing Redis documents..."))
             self._delete_all(ProductCache)
-            # self._delete_all(CustomerCache)
-            # self._delete_all(OrderCache)
+            self._delete_all(CustomerCache)
+            self._delete_all(OrderCache)
 
-        # if not customers_only and not orders_only:
-        #     self.sync_products()
+        if not customers_only and not orders_only:
+            self.sync_products()
 
-        # if not products_only and not orders_only:
-        #     self.sync_customers()
+        if not products_only and not orders_only:
+            self.sync_customers()
         #
         if not products_only and not customers_only:
             self.sync_orders()
@@ -106,7 +107,7 @@ class Command(BaseCommand):
         created_count = 0
         skipped_count = 0
 
-        for product in qs:
+        for product in tqdm(qs, desc="Syncing products..."):
             # try:
             pid = product.pid
             name = product.name
@@ -188,7 +189,7 @@ class Command(BaseCommand):
         created_count = 0
         skipped_count = 0
 
-        for customer in qs:
+        for customer in tqdm(qs, desc="Syncing customers..."):
             # try:
             # find_old_customer = CustomerCache.find(CustomerCache.django_id == customer.id)
             # if find_old_customer.count() > 0:
@@ -242,7 +243,7 @@ class Command(BaseCommand):
         created_count = 0
         skipped_count = 0
 
-        for order in qs:
+        for order in tqdm(qs, desc="Syncing orders..."):
             # try:
             items = list(order.items.all())
 

@@ -33,7 +33,6 @@ class ProductListView(ListAPIView):
         """
         try:
             cached_docs = list(ProductCache.find())
-            print("Redis results: ", cached_docs)
             return cached_docs
         except Exception as e:
             print(e)
@@ -41,9 +40,7 @@ class ProductListView(ListAPIView):
 
     def list(self, request, *args, **kwargs):
         use_cache = self._redis_has_data()
-
         if use_cache:
-            print("use_cache: ", use_cache)
             redis_results = self._get_redis_results()
             page = self.paginate_queryset(redis_results)
             serializer = ProductCacheSerializer(page, many=True)
